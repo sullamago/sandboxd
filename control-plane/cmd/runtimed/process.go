@@ -67,12 +67,14 @@ func (p *process) supervise(ctx context.Context) {
 			fastFails = 0
 		}
 		if fastFails >= maxFastFails {
-			p.log.Error("dev server failing repeatedly — giving up until next start",
+			p.log.Error("process failing repeatedly — giving up until next start",
+				"process", p.name,
 				"restarts", restarts)
 			return
 		}
 		delay := backoff(fastFails)
-		p.log.Warn("dev server exited; restarting after backoff",
+		p.log.Warn("process exited; restarting after backoff",
+			"process", p.name,
 			"delay", delay.String(), "restarts", restarts)
 		select {
 		case <-time.After(delay):
@@ -95,17 +97,17 @@ func (p *process) runOnce() {
 		cmd.Stdout, cmd.Stderr = f, f
 		defer f.Close()
 	} else {
-		p.log.Warn("dev-server log file", "path", p.logPath, "err", err.Error())
+		p.log.Warn("open process log", "process", p.name, "path", p.logPath, "err", err.Error())
 	}
 	if err := cmd.Start(); err != nil {
-		p.log.Error("dev server start failed", "err", err.Error())
+		p.log.Error("process start failed", "process", p.name, "err", err.Error())
 		return
 	}
 	p.mu.Lock()
 	p.proc = cmd.Process
 	p.running = true
 	p.mu.Unlock()
-	p.log.Info("dev server started", "pid", cmd.Process.Pid)
+	p.log.Info("process started", "process", p.name, "pid", cmd.Process.Pid)
 
 	_ = cmd.Wait()
 
@@ -113,7 +115,7 @@ func (p *process) runOnce() {
 	p.proc = nil
 	p.running = false
 	p.mu.Unlock()
-	p.log.Info("dev server exited")
+	p.log.Info("process exited", "process", p.name)
 }
 
 // stop terminates the dev server's process group: SIGTERM, then
@@ -136,7 +138,7 @@ func (p *process) stop() {
 			return
 		}
 	}
-	p.log.Warn("dev server did not exit on SIGTERM; sending SIGKILL")
+	p.log.Warn("process did not exit on SIGTERM; sending SIGKILL", "process", p.name)
 	_ = syscall.Kill(-pgid, syscall.SIGKILL)
 }
 
