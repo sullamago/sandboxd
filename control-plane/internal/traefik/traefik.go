@@ -41,7 +41,14 @@ import "fmt"
 // domain sets PREVIEW_ENTRYPOINT=websecure and PREVIEW_TLS=true, supplies
 // a wildcard cert to Traefik's default TLS store, and gets the original
 // HTTPS behaviour with no per-host ACME.
-func Labels(id string, ports []int, domain, visibility, entrypoint string, tls bool) []string {
+//
+// authPorts forces the `sandbox-preview-auth@file` forward-auth middleware
+// on the listed ports REGARDLESS of visibility. Used to gate specific
+// dashboards (e.g. the agents-ui panel on 3001) even when the rest of
+// the sandbox is public. Pass nil to opt out of per-port forcing
+// (visibility alone then drives the middleware decision — backward
+// compatible with Phase 8's behaviour).
+func Labels(id string, ports []int, domain, visibility, entrypoint string, tls bool, authPorts map[int]bool) []string {
 	if len(ports) == 0 {
 		return nil
 	}
@@ -72,7 +79,7 @@ func Labels(id string, ports []int, domain, visibility, entrypoint string, tls b
 			// store. One cert for every preview host — no per-host ACME.
 			out = append(out, fmt.Sprintf("traefik.http.routers.%s.tls=true", router))
 		}
-		if visibility == "private" {
+		if visibility == "private" || authPorts[p] {
 			out = append(out,
 				fmt.Sprintf("traefik.http.routers.%s.middlewares=sandbox-preview-auth@file", router))
 		}
