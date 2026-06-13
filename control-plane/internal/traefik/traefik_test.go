@@ -24,6 +24,7 @@ func TestLabels_SinglePort_HTTP(t *testing.T) {
 		"traefik.http.routers.s-nx-3000.rule=Host(`s-nx-3000.preview.localhost`)",
 		"traefik.http.routers.s-nx-3000.entrypoints=web",
 		"traefik.http.routers.s-nx-3000.priority=100",
+		"traefik.http.routers.s-nx-3000.service=s-nx-3000",
 		"traefik.http.services.s-nx-3000.loadbalancer.server.port=3000",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -40,6 +41,7 @@ func TestLabels_SinglePort_TLS(t *testing.T) {
 		"traefik.http.routers.s-nx-3000.rule=Host(`s-nx-3000.preview.example.com`)",
 		"traefik.http.routers.s-nx-3000.entrypoints=websecure",
 		"traefik.http.routers.s-nx-3000.priority=100",
+		"traefik.http.routers.s-nx-3000.service=s-nx-3000",
 		"traefik.http.services.s-nx-3000.loadbalancer.server.port=3000",
 		"traefik.http.routers.s-nx-3000.tls=true",
 	}
@@ -53,10 +55,13 @@ func TestLabels_MultiPort(t *testing.T) {
 	if got[0] != "traefik.enable=true" {
 		t.Fatalf("first label must be enable; got %q", got[0])
 	}
-	// Two fixed lines (enable + managed), then 4 lines per port (rule,
-	// entrypoints, priority, service) when TLS is off.
-	if len(got) != 2+4*2 {
-		t.Fatalf("want 10 labels for 2 ports (no TLS); got %d (%v)", len(got), got)
+	// Two fixed lines (enable + managed), then 5 lines per port
+	// (rule, entrypoints, priority, service, loadBalancer.server.port)
+	// when TLS is off. The `service=` line pins each router to its
+	// own load balancer — Traefik v3's auto-link fails when multiple
+	// services live on the same container.
+	if len(got) != 2+5*2 {
+		t.Fatalf("want 12 labels for 2 ports (no TLS); got %d (%v)", len(got), got)
 	}
 	gotMap := map[string]bool{}
 	for _, l := range got {
@@ -65,6 +70,8 @@ func TestLabels_MultiPort(t *testing.T) {
 	for _, must := range []string{
 		"traefik.http.routers.s-01HX-3000.rule=Host(`s-01HX-3000.preview.example.com`)",
 		"traefik.http.routers.s-01HX-3001.rule=Host(`s-01HX-3001.preview.example.com`)",
+		"traefik.http.routers.s-01HX-3000.service=s-01HX-3000",
+		"traefik.http.routers.s-01HX-3001.service=s-01HX-3001",
 		"traefik.http.services.s-01HX-3000.loadbalancer.server.port=3000",
 		"traefik.http.services.s-01HX-3001.loadbalancer.server.port=3001",
 	} {
@@ -107,10 +114,12 @@ func TestLabels_PerPortAuthOverridesVisibility(t *testing.T) {
 		"traefik.http.routers.s-nx-3000.rule=Host(`s-nx-3000.preview.localhost`)",
 		"traefik.http.routers.s-nx-3000.entrypoints=web",
 		"traefik.http.routers.s-nx-3000.priority=100",
+		"traefik.http.routers.s-nx-3000.service=s-nx-3000",
 		"traefik.http.services.s-nx-3000.loadbalancer.server.port=3000",
 		"traefik.http.routers.s-nx-3001.rule=Host(`s-nx-3001.preview.localhost`)",
 		"traefik.http.routers.s-nx-3001.entrypoints=web",
 		"traefik.http.routers.s-nx-3001.priority=100",
+		"traefik.http.routers.s-nx-3001.service=s-nx-3001",
 		"traefik.http.services.s-nx-3001.loadbalancer.server.port=3001",
 		"traefik.http.routers.s-nx-3001.middlewares=sandbox-preview-auth@file",
 	}

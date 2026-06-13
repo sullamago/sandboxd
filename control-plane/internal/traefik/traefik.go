@@ -63,6 +63,14 @@ func Labels(id string, ports []int, domain, visibility, entrypoint string, tls b
 	for _, p := range ports {
 		router := fmt.Sprintf("s-%s-%d", id, p)
 		host := fmt.Sprintf("s-%s-%d.preview.%s", id, p, domain)
+		// Explicit service binding: with multiple ports on one
+		// container, Traefik's default auto-link tries to match each
+		// router to EVERY service on that container, errors with
+		// "cannot be linked automatically with multiple Services",
+		// and falls back to the catch-all wake router — which then
+		// proxies to /forward-auth and returns the error page. The
+		// explicit `service=<name>` line below pins each router to
+		// its own load balancer.
 		out = append(out,
 			fmt.Sprintf("traefik.http.routers.%s.rule=Host(`%s`)", router, host),
 			fmt.Sprintf("traefik.http.routers.%s.entrypoints=%s", router, entrypoint),
@@ -71,6 +79,7 @@ func Labels(id string, ports []int, domain, visibility, entrypoint string, tls b
 			// wins. We pick 100 for headroom against any future
 			// implicit-priority changes.
 			fmt.Sprintf("traefik.http.routers.%s.priority=100", router),
+			fmt.Sprintf("traefik.http.routers.%s.service=%s", router, router),
 			fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port=%d", router, p),
 		)
 		if tls {
