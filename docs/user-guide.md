@@ -139,10 +139,12 @@ echo "agents-ui:     http://s-$ID-3001.preview.localhost"
 ```bash
 API=http://127.0.0.1:9090
 
-# 1. 创建一个暴露 3000 端口的沙箱
+# 1. 创建一个暴露 3000 + 3001 端口的沙箱(3001 = agents-ui 控制面板,走 forward-auth)
 ID=$(curl -s -XPOST $API/sandbox -H 'content-type: application/json' \
-       -d '{"ports":[3000]}' | sed -E 's/.*"id":"([^"]+)".*/\1/')
+       -d '{"ports":[3000,3001],"auth_ports":[3001]}' | sed -E 's/.*"id":"([^"]+)".*/\1/')
 echo "sandbox=$ID"
+echo "dev server:    http://s-$ID-3000.preview.localhost"
+echo "agents-ui:     http://s-$ID-3001.preview.localhost"
 
 # 2. 在沙箱里起一个 dev server
 curl -s -XPOST $API/sandbox/$ID/exec -H 'content-type: application/json' \
