@@ -1,6 +1,11 @@
 # syntax=docker/dockerfile:1.6
 #
-# sandbox-base:0.4.0 — durable base image (Phase 2 lineage).
+# sandbox-base:0.5.0 — durable base image (Phase 2 lineage).
+#
+# 0.5.0 adds the Nuxt 3 "agents-ui" (claude-code-cli-ui) build stage so every
+# sandbox is born with a ~/.claude management dashboard on port 3001, gated
+# by sandboxd's forward-auth middleware. See
+# docs/decisions/2026-06-13-agents-ui-pin.md for the pinned commit.
 #
 # 0.3.0 adds the in-sandbox supervisor `runtimed` as the container's
 # main process (CMD) — see control-plane/cmd/runtimed.
@@ -57,6 +62,56 @@ RUN cd control-plane && go mod download
 COPY control-plane/ ./control-plane/
 RUN cd control-plane && CGO_ENABLED=0 go build -trimpath -o /runtimed ./cmd/runtimed
 
+# --- Stage 1b: build claude-code-cli-ui (agents-ui) ------------------
+# Clones a pinned commit of the Nuxt 3 dashboard, runs `bun install` and
+# `bun run build`, and produces .output/ + node_modules that the final
+# stage consumes. The SHA pin is the source-of-truth for which version of
+# agents-ui ships; see docs/decisions/2026-06-13-agents-ui-pin.md.
+#
+# Why a separate stage: keeps `node_modules` out of the final image (we
+# only need the production Nuxt server), so the runtime layer doesn't
+# have access to build-time devDeps (eslint, vue-tsc, etc).
+#
+# Why node:20-bookworm and not oven/bun:1.1.30 directly: node-pty ships
+# prebuilt linux-x64 binaries for Node 20, so we don't need to install
+# build tools + python (and node-gyp) as a fallback. node:20-bookworm
+# has git + curl baked in too. This keeps the builder stage small and
+# avoids an apt install entirely.
+FROM node:20-bookworm-slim AS agents-ui-builder
+ARG BUN_VERSION=1.1.30
+ARG AGENTS_UI_REF
+WORKDIR /src
+# node:20-bookworm-slim ships with just node + npm. We need git (to clone)
+# and bun (the project's package manager + bundler). Install bun via npm
+# since curl isn't on this image. If node-pty falls back to node-gyp
+# we'll see a build error and revisit; ideally it ships linux-x64 prebuilds.
+RUN npm install -g "bun@${BUN_VERSION}" \
+ && npm cache clean --force
+# Retry wrapper around apt-get install — the sandbox's apt proxy
+# (28.0.0.16:80) occasionally 502s on individual .deb fetches. Three
+# attempts are usually enough to ride out a transient. We install
+# git + build-essential + python3 because node-pty falls back to
+# node-gyp when no prebuilt linux-x64 binary matches; node-gyp needs
+# both to compile the C++ addon.
+RUN for i in 1 2 3; do \
+      apt-get update \
+      && apt-get install -y --no-install-recommends \
+           ca-certificates git build-essential python3 \
+      && break; \
+      echo "apt-get attempt $i failed, retrying in 5s..."; \
+      sleep 5; \
+    done \
+ && rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 https://github.com/Ngxba/claude-code-cli-ui.git . \
+ && git fetch --depth 1 origin ${AGENTS_UI_REF} \
+ && git checkout ${AGENTS_UI_REF}
+# Not --frozen-lockfile: bun 1.1.x will rewrite the lockfile on every
+# resolve even when the resolved tree is identical, and the upstream
+# project pins a lockfile produced by a different bun point release.
+# SHA is the source of truth, not the lockfile.
+RUN bun install
+RUN bun run build
+
 # --- Stage 2: the sandbox base image ---------------------------------
 FROM debian:stable-slim
 
@@ -64,10 +119,15 @@ ARG NODE_VERSION=20.x
 ARG PNPM_VERSION=9.12.0
 ARG BUN_VERSION=1.1.30
 ARG UV_VERSION=0.4.20
+ARG AGENTS_UI_REF=46494279f514d7116b08311c32dd6a1c510a6f7a
+ARG AGENTS_UI_PORT=3001
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
-    PATH=/usr/local/bin:/usr/bin:/bin:/home/sandbox/.local/bin:/home/sandbox/.bun/bin
+    PATH=/usr/local/bin:/usr/bin:/bin:/home/sandbox/.local/bin:/home/sandbox/.bun/bin \
+    AGENTS_UI_DIR=/opt/agents-ui \
+    AGENTS_UI_PORT=${AGENTS_UI_PORT} \
+    AGENTS_UI_CMD="node /opt/agents-ui/.output/server/index.mjs"
 
 # Strip docs/locales/man pages aggressively from anything we install
 # below. dpkg consults this file at install time so the excluded paths
@@ -142,8 +202,18 @@ ENV NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
 # the container's main process below.
 COPY --from=runtimed-builder /runtimed /usr/local/bin/runtimed
 
+# agents-ui production server + its bundled node_modules.
+COPY --from=agents-ui-builder --chown=sandbox:sandbox /src/.output /opt/agents-ui/.output
+COPY --from=agents-ui-builder --chown=sandbox:sandbox /src/node_modules /opt/agents-ui/node_modules
+COPY --from=agents-ui-builder --chown=sandbox:sandbox /src/package.json /opt/agents-ui/package.json
+
 USER sandbox
 WORKDIR /home/sandbox/workspace
+
+# Informational: which ports the long-running processes listen on. The
+# sandbox is started with -p for these via the control plane; this is
+# just for `docker inspect`.
+EXPOSE 3000 3001
 
 # tini reaps zombies (coding agents fork heavily); runtimed is the
 # container's main process — it supervises the dev server and runs
