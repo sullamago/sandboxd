@@ -154,13 +154,18 @@ ARG UV_VERSION=0.4.20
 ARG AGENTS_UI_REF=46494279f514d7116b08311c32dd6a1c510a6f7a
 ARG AGENTS_UI_PORT=3001
 
+# agents-ui (Nuxt 3 / Nitro) listens on NITRO_PORT (Nuxt's documented var;
+# PORT is also honored but we avoid setting it globally because the user's
+# Vite/Next dev server also reads PORT and would re-bind). The empty-string
+# check in runtimed keeps the supervisor inert on custom images that don't
+# ship agents-ui.
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     PATH=/usr/local/bin:/usr/bin:/bin:/home/sandbox/.local/bin:/home/sandbox/.bun/bin \
     AGENTS_UI_DIR=/opt/agents-ui \
     AGENTS_UI_PORT=${AGENTS_UI_PORT} \
     AGENTS_UI_CMD="node /opt/agents-ui/.output/server/index.mjs" \
-    PORT=${AGENTS_UI_PORT}
+    NITRO_PORT=${AGENTS_UI_PORT}
 
 # Strip docs/locales/man pages aggressively from anything we install
 # below. dpkg consults this file at install time so the excluded paths
