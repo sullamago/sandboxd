@@ -81,7 +81,11 @@ RUN cd control-plane && CGO_ENABLED=0 go build -trimpath -o /runtimed ./cmd/runt
 # own image via `npm install -g bun` (no curl needed; npm is present).
 FROM node:20-bookworm-slim AS agents-ui-builder
 ARG BUN_VERSION=1.1.30
-ARG AGENTS_UI_REF
+# Same default as in the final stage (below) — keep these in sync. The
+# `ARG` scope is per-stage, so we can't just declare it once; the default
+# is duplicated and a comment marks the contract. Override at build time
+# with `--build-arg AGENTS_UI_REF=<sha>`.
+ARG AGENTS_UI_REF=46494279f514d7116b08311c32dd6a1c510a6f7a
 WORKDIR /src
 # Install bun via npm (the only package manager present at this point).
 RUN npm install -g "bun@${BUN_VERSION}" \
@@ -110,7 +114,18 @@ RUN git clone --depth 1 https://github.com/Ngxba/claude-code-cli-ui.git . \
 # resolve even when the resolved tree is identical, and the upstream
 # project pins a lockfile produced by a different bun point release.
 # SHA is the source of truth, not the lockfile.
-RUN bun install
+# Drop devDeps from the COPY'd node_modules tree: at the pinned commit,
+# the only devDependencies in package.json are `typescript`,
+# `@types/ws`, and `@iconify-json/lucide`. They have no runtime
+# consumers (the Nuxt build already produced .output/ — we only need
+# node_modules to RUN the server, not to typecheck / iconify). We
+# install normally (preserving the upstream-migrated bun.lock pins)
+# and `rm -rf` the devDeps dirs afterwards. Using `bun install
+# --production` here would force a clean re-resolve from package.json
+# `^` ranges, which (per the comment above) lets bun pick newer,
+# larger transitive deps and bloats the final image by hundreds of MB.
+RUN bun install \
+ && rm -rf node_modules/typescript node_modules/@types node_modules/@iconify-json
 RUN bun run build
 # node-pty native module: at the pinned upstream commit, npm's prebuilt
 # linux-x64 binary is NOT shipped in the package (only win32-{x64,arm64}
