@@ -41,7 +41,14 @@ import "fmt"
 // domain sets PREVIEW_ENTRYPOINT=websecure and PREVIEW_TLS=true, supplies
 // a wildcard cert to Traefik's default TLS store, and gets the original
 // HTTPS behaviour with no per-host ACME.
-func Labels(id string, ports []int, domain, visibility, entrypoint string, tls bool) []string {
+//
+// authPorts forces the `sandbox-preview-auth@file` forward-auth middleware
+// on the listed ports REGARDLESS of visibility. Used to gate specific
+// dashboards (e.g. the agents-ui panel on 3001) even when the rest of
+// the sandbox is public. Pass nil to opt out of per-port forcing
+// (visibility alone then drives the middleware decision — backward
+// compatible with Phase 8's behaviour).
+func Labels(id string, ports []int, domain, visibility, entrypoint string, tls bool, authPorts map[int]bool) []string {
 	if len(ports) == 0 {
 		return nil
 	}
@@ -56,6 +63,14 @@ func Labels(id string, ports []int, domain, visibility, entrypoint string, tls b
 	for _, p := range ports {
 		router := fmt.Sprintf("s-%s-%d", id, p)
 		host := fmt.Sprintf("s-%s-%d.preview.%s", id, p, domain)
+		// Explicit service binding: with multiple ports on one
+		// container, Traefik's default auto-link tries to match each
+		// router to EVERY service on that container, errors with
+		// "cannot be linked automatically with multiple Services",
+		// and falls back to the catch-all wake router — which then
+		// proxies to /forward-auth and returns the error page. The
+		// explicit `service=<name>` line below pins each router to
+		// its own load balancer.
 		out = append(out,
 			fmt.Sprintf("traefik.http.routers.%s.rule=Host(`%s`)", router, host),
 			fmt.Sprintf("traefik.http.routers.%s.entrypoints=%s", router, entrypoint),
@@ -64,6 +79,7 @@ func Labels(id string, ports []int, domain, visibility, entrypoint string, tls b
 			// wins. We pick 100 for headroom against any future
 			// implicit-priority changes.
 			fmt.Sprintf("traefik.http.routers.%s.priority=100", router),
+			fmt.Sprintf("traefik.http.routers.%s.service=%s", router, router),
 			fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port=%d", router, p),
 		)
 		if tls {
@@ -72,7 +88,7 @@ func Labels(id string, ports []int, domain, visibility, entrypoint string, tls b
 			// store. One cert for every preview host — no per-host ACME.
 			out = append(out, fmt.Sprintf("traefik.http.routers.%s.tls=true", router))
 		}
-		if visibility == "private" {
+		if visibility == "private" || authPorts[p] {
 			out = append(out,
 				fmt.Sprintf("traefik.http.routers.%s.middlewares=sandbox-preview-auth@file", router))
 		}

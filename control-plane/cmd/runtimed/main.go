@@ -23,15 +23,14 @@ import (
 
 const version = "0.1.0"
 
-// app holds runtimed's live state: the dev-server supervisor, the most
+// app holds runtimed's live state: the supervised processes, the most
 // recent preview health probe, and the one active coding task.
 type app struct {
-	dev         *devServer
-	previewPort int
-	appDir      string
-	runtimeDir  string
-	log         *slog.Logger
-	bootedAt    time.Time
+	processes  []*process
+	appDir     string
+	runtimeDir string
+	log        *slog.Logger
+	bootedAt   time.Time
 
 	mu           sync.Mutex
 	lastCode     int
@@ -48,9 +47,18 @@ func main() {
 	appDir := envOr("RUNTIMED_APP_DIR", "/home/sandbox/workspace/app")
 	runtimeDir := envOr("RUNTIMED_DIR", "/home/sandbox/.runtimed")
 	socketPath := envOr("RUNTIMED_SOCKET", filepath.Join(runtimeDir, "sock"))
-	devCmd := envOr("RUNTIMED_DEV_CMD", "pnpm dev")
-	previewPort := envOrInt("RUNTIMED_PREVIEW_PORT", 3000)
+	devCommand := envOr("RUNTIMED_DEV_CMD", "pnpm dev")
+	devPort := envOrInt("RUNTIMED_PREVIEW_PORT", 3000)
 	probeInterval := time.Duration(envOrInt("RUNTIMED_PROBE_INTERVAL_SECONDS", 3)) * time.Second
+	// agents-ui (the Nuxt server baked into the image at /opt/agents-ui)
+	// is supervised alongside the user's dev server. The empty-string
+	// check on AGENTS_UI_CMD below lets the supervisor stay inert on
+	// custom images that don't ship agents-ui (operators can pass
+	// --env AGENTS_UI_CMD="" at sandbox-create time, or bake a custom
+	// image without the /opt/agents-ui tree).
+	agentsUICommand := envOr("AGENTS_UI_CMD", "")
+	agentsUIDir := envOr("AGENTS_UI_DIR", "/opt/agents-ui")
+	agentsUIPort := envOrInt("AGENTS_UI_PORT", 3001)
 
 	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
 		log.Error("mkdir runtime dir", "dir", runtimeDir, "err", err.Error())
@@ -67,13 +75,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	processes := []*process{
+		newProcess("dev", appDir, devCommand, devPort,
+			filepath.Join(runtimeDir, "dev-server.log"), log),
+	}
+	if agentsUICommand != "" {
+		processes = append(processes,
+			newProcess("agents-ui", agentsUIDir, agentsUICommand, agentsUIPort,
+				filepath.Join(runtimeDir, "agents-ui.log"), log))
+	}
+
 	a := &app{
-		dev:         newDevServer(appDir, devCmd, filepath.Join(runtimeDir, "dev-server.log"), log),
-		previewPort: previewPort,
-		appDir:      appDir,
-		runtimeDir:  runtimeDir,
-		log:         log,
-		bootedAt:    time.Now(),
+		processes:  processes,
+		appDir:     appDir,
+		runtimeDir: runtimeDir,
+		log:        log,
+		bootedAt:   time.Now(),
 	}
 
 	// Finalize any task interrupted by a previous stop/crash before
@@ -83,7 +100,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	go a.dev.supervise(ctx)
+	for _, p := range a.processes {
+		go p.supervise(ctx)
+	}
 	go a.probeLoop(ctx, probeInterval)
 
 	log.Info("runtimed started", "version", version, "app_dir", appDir, "socket", socketPath)
@@ -91,14 +110,17 @@ func main() {
 		log.Error("control server", "err", err.Error())
 	}
 
-	// ctx is done — shut the dev server down cleanly before exiting.
-	log.Info("runtimed shutting down — stopping dev server")
-	a.dev.stop()
+	// ctx is done — shut every supervised process down cleanly before
+	// exiting.
+	log.Info("runtimed shutting down — stopping supervised processes")
+	for _, p := range a.processes {
+		p.stop()
+	}
 	log.Info("runtimed stopped")
 }
 
-// probeLoop polls the dev server's HTTP port so /status reports a real
-// readiness signal rather than just process liveness.
+// probeLoop polls each supervised process's HTTP port so /status
+// reports a real readiness signal rather than just process liveness.
 func (a *app) probeLoop(ctx context.Context, interval time.Duration) {
 	a.probe()
 	t := time.NewTicker(interval)
@@ -114,17 +136,48 @@ func (a *app) probeLoop(ctx context.Context, interval time.Duration) {
 }
 
 func (a *app) probe() {
+	// Probe every supervised process for HTTP liveness so /status
+	// reports a real readiness signal rather than just process
+	// liveness. The dev server gets the full entry-asset transform
+	// check (a 200 shell can still mean a blank page); other
+	// processes — the agents-ui Nuxt server today, more in the future
+	// — get a plain GET / liveness probe.
+	dev := findProcessByName(a.processes, "dev")
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
-	code, _ := a.devGet(ctx, "/")
-	// The HTML shell can serve 200 while the dev server fails to
-	// transform the real entry modules (a blank page). Only probe the
-	// entry assets once the shell is up, so `error` means "renders the
-	// shell but the app is broken", not "still starting".
-	assetErr := ""
-	if code == 200 {
-		assetErr = a.probeEntryAssets(ctx)
+
+	var (
+		code     int
+		assetErr string
+	)
+	if dev != nil {
+		code, _ = a.devGet(ctx, dev.port, "/")
+		// The HTML shell can serve 200 while the dev server fails to
+		// transform the real entry modules (a blank page). Only probe
+		// the entry assets once the shell is up, so `error` means
+		// "renders the shell but the app is broken", not "still
+		// starting".
+		if code == 200 {
+			assetErr = a.probeEntryAssets(ctx, dev.port)
+		}
 	}
+
+	// Liveness probe for every other supervised process (e.g.
+	// agents-ui). We don't surface per-process HTTP status from the
+	// continuous probe — /status's `processes` block carries running/
+	// restarts and the wake page (Task 7) reads `lastCode` from the
+	// dev probe. This loop is what guarantees agents-ui is "really
+	// up" before the wake page lets the user in.
+	for _, p := range a.processes {
+		if dev != nil && p == dev {
+			continue
+		}
+		// Discard the response — the HTTP round-trip is the probe.
+		// Per-process error state, if we ever want it, would go on
+		// the process struct alongside `running`.
+		_, _ = a.devGet(ctx, p.port, "/")
+	}
+
 	a.mu.Lock()
 	a.lastCode = code
 	a.lastAssetErr = assetErr
@@ -132,10 +185,24 @@ func (a *app) probe() {
 	a.mu.Unlock()
 }
 
-// status derives the runtime.Status snapshot from the dev-server
-// process state and the latest health probe.
+// findProcessByName returns the first supervised process whose name
+// matches, or nil if none does. Used by the probe loop and /status to
+// locate the dev process by stable identity (not by slice index, which
+// changes as more processes are appended).
+func findProcessByName(processes []*process, name string) *process {
+	for _, p := range processes {
+		if p.name == name {
+			return p
+		}
+	}
+	return nil
+}
+
+// status derives the runtime.Status snapshot from each supervised
+// process's state and the latest health probe.
 func (a *app) status() runtime.Status {
-	pid, restarts, running := a.dev.snapshot()
+	dev := findProcessByName(a.processes, "dev")
+	pid, restarts, running := dev.snapshot()
 	a.mu.Lock()
 	code, assetErr, checked := a.lastCode, a.lastAssetErr, a.lastChecked
 	a.mu.Unlock()
@@ -160,6 +227,18 @@ func (a *app) status() runtime.Status {
 		c := checked
 		ps.LastCheckedAt = &c
 	}
+
+	processes := make([]runtime.ProcessStatus, 0, len(a.processes))
+	for _, p := range a.processes {
+		r, r2 := p.status()
+		processes = append(processes, runtime.ProcessStatus{
+			Name:     p.name,
+			Port:     p.port,
+			Running:  r,
+			Restarts: r2,
+		})
+	}
+
 	return runtime.Status{
 		Runtimed: runtime.RuntimedInfo{
 			Version:  version,
@@ -167,6 +246,7 @@ func (a *app) status() runtime.Status {
 			UptimeS:  int64(time.Since(a.bootedAt).Seconds()),
 		},
 		Preview:    ps,
+		Processes:  processes,
 		ActiveTask: a.activeTaskRef(),
 	}
 }

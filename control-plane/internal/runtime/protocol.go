@@ -40,8 +40,23 @@ const (
 type Status struct {
 	Runtimed RuntimedInfo `json:"runtimed"`
 	Preview  PreviewState `json:"preview"`
+	// Processes reports the runtime state of every long-running child
+	// runtimed supervises. Today: the user's dev server on 3000. After
+	// Task 6: also the agents-ui Nuxt server on 3001. The Preview
+	// block above is a backwards-compatible summary for the dev server
+	// (the first "user-facing" process); Processes is the full picture.
+	Processes []ProcessStatus `json:"processes"`
 	// ActiveTask is the running task, or null when idle.
 	ActiveTask *ActiveTask `json:"active_task"`
+}
+
+// ProcessStatus is one supervised process's snapshot for /status. The
+// Name matches the supervisor's `name` field (e.g. "dev", "agents-ui").
+type ProcessStatus struct {
+	Name     string `json:"name"`
+	Port     int    `json:"port"`
+	Running  bool   `json:"running"`
+	Restarts int    `json:"restarts"`
 }
 
 // RuntimedInfo identifies the supervisor and how long it has been up.
