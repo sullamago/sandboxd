@@ -72,27 +72,28 @@ RUN cd control-plane && CGO_ENABLED=0 go build -trimpath -o /runtimed ./cmd/runt
 # only need the production Nuxt server), so the runtime layer doesn't
 # have access to build-time devDeps (eslint, vue-tsc, etc).
 #
-# Why node:20-bookworm and not oven/bun:1.1.30 directly: node-pty ships
-# prebuilt linux-x64 binaries for Node 20, so we don't need to install
-# build tools + python (and node-gyp) as a fallback. node:20-bookworm
-# has git + curl baked in too. This keeps the builder stage small and
-# avoids an apt install entirely.
+# Why node:20-bookworm-slim instead of oven/bun:1.1.30: node-pty is
+# published with prebuilt linux-x64 binaries for Node 20 (the project
+# uses process.arch='x64' and process.platform='linux' to look them
+# up at `node-pty/prebuilds/linux-x64/pty.node`), and we need git
+# available for the clone step. oven/bun ships neither prebuilt node-pty
+# binaries for this node ABI nor git, so we install bun into Node's
+# own image via `npm install -g bun` (no curl needed; npm is present).
 FROM node:20-bookworm-slim AS agents-ui-builder
 ARG BUN_VERSION=1.1.30
 ARG AGENTS_UI_REF
 WORKDIR /src
-# node:20-bookworm-slim ships with just node + npm. We need git (to clone)
-# and bun (the project's package manager + bundler). Install bun via npm
-# since curl isn't on this image. If node-pty falls back to node-gyp
-# we'll see a build error and revisit; ideally it ships linux-x64 prebuilds.
+# Install bun via npm (the only package manager present at this point).
 RUN npm install -g "bun@${BUN_VERSION}" \
  && npm cache clean --force
 # Retry wrapper around apt-get install — the sandbox's apt proxy
 # (28.0.0.16:80) occasionally 502s on individual .deb fetches. Three
 # attempts are usually enough to ride out a transient. We install
-# git + build-essential + python3 because node-pty falls back to
-# node-gyp when no prebuilt linux-x64 binary matches; node-gyp needs
-# both to compile the C++ addon.
+# ca-certificates (HTTPS clones), git (clone below), build-essential +
+# python3 (node-gyp fallback if no prebuilt linux-x64 binary matches
+# — at the pinned upstream commit node-pty's npm prebuilds only ship
+# for win32-{x64,arm64} and darwin-{x64,arm64}, so node-gyp rebuilds
+# build/Release/pty.node which the post-build step below relocates).
 RUN for i in 1 2 3; do \
       apt-get update \
       && apt-get install -y --no-install-recommends \
@@ -111,6 +112,22 @@ RUN git clone --depth 1 https://github.com/Ngxba/claude-code-cli-ui.git . \
 # SHA is the source of truth, not the lockfile.
 RUN bun install
 RUN bun run build
+# node-pty native module: at the pinned upstream commit, npm's prebuilt
+# linux-x64 binary is NOT shipped in the package (only win32-{x64,arm64}
+# and darwin-{x64,arm64} ship), so `bun install` + node-gyp rebuild
+# produces `node_modules/node-pty/build/Release/pty.node` only. Nuxt's
+# `.output/server/index.mjs` then throws `Cannot find module
+# './prebuilds/linux-x64//pty.node'` because utils.js looks at the
+# `prebuilds/<platform>-<arch>` path first. Place the built binary
+# into BOTH the source node_modules tree (in case any tooling reads
+# it) AND the `.output/server/node_modules/node-pty` tree (where the
+# runtime resolves `require('./prebuilds/linux-x64/pty.node')`).
+RUN mkdir -p node_modules/node-pty/prebuilds/linux-x64 \
+            .output/server/node_modules/node-pty/prebuilds/linux-x64 \
+ && cp node_modules/node-pty/build/Release/pty.node \
+      node_modules/node-pty/prebuilds/linux-x64/pty.node \
+ && cp node_modules/node-pty/build/Release/pty.node \
+      .output/server/node_modules/node-pty/prebuilds/linux-x64/pty.node
 
 # --- Stage 2: the sandbox base image ---------------------------------
 FROM debian:stable-slim
