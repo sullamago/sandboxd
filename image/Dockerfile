@@ -144,7 +144,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/usr/local/bin:/usr/bin:/bin:/home/sandbox/.local/bin:/home/sandbox/.bun/bin \
     AGENTS_UI_DIR=/opt/agents-ui \
     AGENTS_UI_PORT=${AGENTS_UI_PORT} \
-    AGENTS_UI_CMD="node /opt/agents-ui/.output/server/index.mjs"
+    AGENTS_UI_CMD="node /opt/agents-ui/.output/server/index.mjs" \
+    PORT=${AGENTS_UI_PORT}
 
 # Strip docs/locales/man pages aggressively from anything we install
 # below. dpkg consults this file at install time so the excluded paths
