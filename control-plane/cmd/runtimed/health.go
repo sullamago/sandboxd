@@ -125,7 +125,7 @@ func checkStaleConfigRestart(ctx context.Context, h *healthCtx) finding {
 	if len(hits) == 0 {
 		return finding{}
 	}
-	h.app.dev.stop() // supervisor respawns with fresh config
+	h.app.processes[0].stop() // supervisor respawns with fresh config
 	ready := h.app.waitDevReady(ctx, 25*time.Second)
 	return finding{
 		note:       fmt.Sprintf("dev config changed (%s); restarted dev server [ready=%v]", strings.Join(hits, ","), ready),
@@ -144,8 +144,9 @@ func checkStaleConfigRestart(ctx context.Context, h *healthCtx) finding {
 var entryAssetProbes = []string{"/src/index.css", "/src/main.tsx"}
 
 func checkEntryAssetCompile(ctx context.Context, h *healthCtx) finding {
+	dev := h.app.processes[0]
 	for _, p := range entryAssetProbes {
-		code, body := h.app.devGet(ctx, p)
+		code, body := h.app.devGet(ctx, dev.port, p)
 		if code < 500 {
 			continue
 		}
@@ -159,10 +160,10 @@ func checkEntryAssetCompile(ctx context.Context, h *healthCtx) finding {
 
 // ─── shared helpers ─────────────────────────────────────────────────
 
-// devGet performs a GET against the dev server's loopback port and
-// returns the status code (0 = no answer) and a capped body.
-func (a *app) devGet(ctx context.Context, path string) (int, string) {
-	url := fmt.Sprintf("http://127.0.0.1:%d%s", a.previewPort, path)
+// devGet performs a GET against the given loopback port and returns
+// the status code (0 = no answer) and a capped body.
+func (a *app) devGet(ctx context.Context, port int, path string) (int, string) {
+	url := fmt.Sprintf("http://127.0.0.1:%d%s", port, path)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return 0, ""
@@ -180,12 +181,13 @@ func (a *app) devGet(ctx context.Context, path string) (int, string) {
 // waitDevReady polls GET / until the dev server answers 200 or the
 // budget expires; returns whether it became ready.
 func (a *app) waitDevReady(ctx context.Context, budget time.Duration) bool {
+	dev := a.processes[0]
 	deadline := time.Now().Add(budget)
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
 			return false
 		}
-		if code, _ := a.devGet(ctx, "/"); code == 200 {
+		if code, _ := a.devGet(ctx, dev.port, "/"); code == 200 {
 			return true
 		}
 		time.Sleep(300 * time.Millisecond)
@@ -196,9 +198,9 @@ func (a *app) waitDevReady(ctx context.Context, budget time.Duration) bool {
 // probeEntryAssets returns the first entry-asset compile error, or "".
 // Used by the continuous probe (main.go) so live preview status reflects
 // dev-server transform failures, not just the HTML shell's 200.
-func (a *app) probeEntryAssets(ctx context.Context) string {
+func (a *app) probeEntryAssets(ctx context.Context, port int) string {
 	for _, p := range entryAssetProbes {
-		if code, body := a.devGet(ctx, p); code >= 500 {
+		if code, body := a.devGet(ctx, port, p); code >= 500 {
 			return extractDevError(body)
 		}
 	}
