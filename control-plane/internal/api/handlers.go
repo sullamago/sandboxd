@@ -40,6 +40,7 @@ type externalReq struct {
 type createReq struct {
 	ID         string      `json:"id,omitempty"`
 	Ports      []int       `json:"ports,omitempty"`
+	AuthPorts  []int       `json:"auth_ports,omitempty"`
 	MemoryHigh string      `json:"memory_high,omitempty"`
 	Visibility string      `json:"visibility,omitempty"`
 	External   externalReq `json:"external"`
@@ -301,6 +302,14 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	authSet := make(map[int]bool, len(req.AuthPorts))
+	for _, p := range req.AuthPorts {
+		if p < 1 || p > 65535 {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("auth_ports: port out of range: %d", p))
+			return
+		}
+		authSet[p] = true
+	}
 	if req.ID == "" {
 		req.ID = newULID()
 	} else if !isULID(req.ID) {
@@ -532,7 +541,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. docker run with the locked flag set + traefik labels.
-	labels := traefik.Labels(req.ID, req.Ports, s.PreviewDomain, visibility, s.PreviewEntrypoint, s.PreviewTLS)
+	labels := traefik.Labels(req.ID, req.Ports, s.PreviewDomain, visibility, s.PreviewEntrypoint, s.PreviewTLS, authSet)
 	startRun := time.Now()
 	var runErr error
 	containerID, runErr := s.Docker.Run(r.Context(), docker.RunSpec{
