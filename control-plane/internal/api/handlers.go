@@ -310,6 +310,23 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		authSet[p] = true
 	}
+	// Cross-check: every auth_ports entry must be in the declared ports list.
+	// Otherwise the middleware label gets attached to a router that doesn't
+	// exist and the operator's intent is silently dropped.
+	for p := range authSet {
+		found := false
+		for _, declared := range req.Ports {
+			if declared == p {
+				found = true
+				break
+			}
+		}
+		if !found {
+			writeErr(w, http.StatusBadRequest,
+				fmt.Sprintf("auth_ports: port %d not in declared ports", p))
+			return
+		}
+	}
 	if req.ID == "" {
 		req.ID = newULID()
 	} else if !isULID(req.ID) {
